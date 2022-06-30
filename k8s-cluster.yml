@@ -1,0 +1,179 @@
+# This anisble playbook will create kubernetes cluster for one master node and two workders nodes
+
+- name: Change hostname for master and workers node 
+  hosts: "master, workers"
+  gather_facts: no
+  tasks:
+  - name: changing hostname for master node
+    hostname:
+      name: k8s-master.example.com
+    when: inventory_hostname == "master"
+  - name: changing hostname for worker1 node
+    hostname:
+      name: k8s-worker1.example.com
+    when: inventory_hostname == "worker1"
+  - name: changing hostname for worker2 node
+    hostname:
+      name: k8s-worker2.example.com
+    when: inventory_hostname == "worker2"
+  - name: Update /etc/hosts file 
+    lineinfile: 
+      dest: /etc/hosts
+      line: "192.168.56.115 k8s-master.example.com k8s-master"
+  - name: Adding worker node in /etc/hosts file 
+    lineinfile: 
+      dest: /etc/hosts
+      line: "192.168.56.126 k8s-worker.example.com k8s-worker"
+  - name: Adding worker node in /etc/hosts file 
+    lineinfile: 
+      dest: /etc/hosts
+      line: "192.168.56.127 k8s-worker1.example.com k8s-worker1"
+  - name: Disable swam in /etc/fstabe
+    shell: sed -i '/swap/s/^/#/g' /etc/fstab && swapoff -a 
+  - name: Disable SeLinux 
+    shell: sed -i '/SELINUX/s/^/#/g' /etc/selinux/config && echo "SELINUX=disabled" >> /etc/selinux/config && setenforce 0
+  - name: Stop and disable firewalld serivces 
+    shell: systemctl stop firewalld && systemctl disable firewalld
+  - name: load br_netfilter module
+    shell: modprobe br_netfilter
+  - name: Installing Docker in master and workers node
+    yum:
+      name:
+        - yum-utils
+        - device-mapper-persistent-data
+        - lvm2
+        - sshpass
+      state: present
+  - name: Add docker repo into yum repository
+    get_url:
+      url: https://download.docker.com/linux/centos/docker-ce.repo
+      dest: /etc/yum.repos.d/docer-ce.repo 
+  - name: upgrade all packages
+    yum:
+      name: '*'
+      state: present
+  - name: Installing docker in master and workers node
+    yum: 
+      name: 
+        - containerd.io
+        - docker-ce
+        - docker-ce-cli
+      state: present
+  - name: creating daemon.json file 
+    shell: 
+      cmd: |
+        mkdir /etc/docker
+        cat > /etc/docker/daemon.json << EOF 
+        {
+        "exec-opts": ["native.cgroupdriver=systemd"],
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "100m"
+        },
+        "storage-driver": "overlay2",
+        "storage-opts": [
+          "overlay2.override_kernel_check=true"
+        ]
+        }
+        EOF
+  - name: Creating systemd file start and enable docker daemon 
+    shell: 
+      cmd: |
+        mkdir -p /etc/systemd/system/docker.service.d
+        systemctl daemon-reload
+        systemctl start docker
+        systemctl enable docker
+
+  # Installing Kubernetes components in master and workers node
+  - name: Adding Kubernetes repo 
+    shell: 
+      cmd: | 
+        cat > /etc/yum.repos.d/kubernetes.repo << EOF 
+        [kubernetes]
+        name=Kubernetes
+        baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+        enabled=1
+        gpgcheck=0
+        repo_gpgcheck=0
+        gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+        EOF
+  - name: Installing Kubeadm, kubeclt and kubelet
+    yum:
+      name: 
+        - kubelet 
+        - kubeadm 
+        - kubectl
+      disable_excludes: 'kubernetes'
+      state: present
+    become: true
+  - name: Enable kubelet
+    shell:
+      cmd: |
+        systemctl enable --now kubelet
+  - name: Create kubernetes network file to configure system configuration
+    shell:
+      cmd: |
+        cat > /etc/sysctl.d/k8s.conf << EOF 
+        net.bridge.bridge-nf-call-ip6tables = 1
+        net.bridge.bridge-nf-call-iptables = 1
+        EOF
+        sysctl --system
+
+# Intializing Kubernetes cluster 
+  - name: intializing kubernetes cluster
+    shell: 
+      cmd: | 
+        kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=192.168.56.115
+    when: inventory_hostname == "master"
+  - name: create kube directory in root's home directory
+    shell:
+      cmd: |
+        mkdir mkdir -p $HOME/.kube
+        cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+        chown $(id -u):$(id -g) $HOME/.kube/config
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+    when: inventory_hostname == "master"
+  - name: create pod's network in master node
+    shell:
+      cmd: |
+        kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+        kubectl taint nodes --all node-role.kubernetes.io/master-
+    when: inventory_hostname == "master"
+
+# Generating token to join worker nodes
+  - name: Joining worker node to cluster
+    shell: 
+      cmd: |  
+        kubeadm token create  --print-join-command
+    when: inventory_hostname == "master"
+    register: join_token
+  - debug: msg="{{ join_token.stdout }}"
+    when: inventory_hostname == "master"
+  - name: Copy join command to local file
+    local_action: copy content="{{ join_token.stdout_lines[0] }}" dest="/tmp/join_token" mode=0777
+    when: inventory_hostname == "master"
+
+# Copying token from master to worker node
+  - name: Copy join command file from master to worker1 node
+    copy: 
+      src: /tmp/join_token
+      dest: /tmp/join_token
+      mode: 0777
+    when: inventory_hostname == "worker1"
+
+  - name: Copy join command file from master to worker2 node
+    copy: 
+      src: /tmp/join_token
+      dest: /tmp/join_token
+      mode: 0777
+    when: inventory_hostname == "worker2"
+
+# Joing worker nodes to cluster 
+  - name: joining workers node to cluster
+    command: sh /tmp/join_token
+    register: joined_or_not
+    when: inventory_hostname == "worker1"
+  - name: joining workers node to cluster
+    command: sh /tmp/join_token
+    register: joined_or_not
+    when: inventory_hostname == "worker2"
