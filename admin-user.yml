@@ -1,0 +1,37 @@
+# By default dashboard has less previleges to see the dashboard resources. So need to configure cluster admin user using as following
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kubernetes-dashboard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kubernetes-dashboard
+
+# URL: https://k8s-worker.example.com:31570/#/workloads?namespace=kubernetes-dashboard 
+# Some Ref: https://github.com/kubernetes/dashboard/blob/master/docs/user/installation.md#recommended-setup
+#
+
+# Command: To get the tokem for admin-user
+# $ kubectl -n kubernetes-dashboard describe secret $(kubectl -n kubernetes-dashboard get secret | grep admin-user | awk '{print $1}')
+
+# Note: Without kubectl proxy to access the dashbord need to configure secret with SSL and bind it to container like below.
+
+# containers:
+#       - args:
+#         - --tls-cert-file=/tls.crt
+#         - --tls-key-file=/tls.key
+
+# OR Could be configure naginx reverse proxy with SSL certificate for accessing Dashboard.
+# Ref: https://gist.github.com/pedrouid/4abcc16c0218a46a577cfa8186cb845d
